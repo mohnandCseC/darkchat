@@ -1,5 +1,3 @@
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -11,7 +9,9 @@
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: monospace; }
     html, body { height: 100%; height: 100dvh; overflow: hidden; background: #000; color: #00ff66; }
     #box { display: flex; flex-direction: column; height: 100%; background: #050d08; }
-    #head { border-bottom: 1px solid #00ff66; padding: 10px 14px; background: #00220f; font-weight: bold; display: flex; justify-content: space-between; font-size: 13px; }
+    #head { border-bottom: 1px solid #00ff66; padding: 10px 14px; background: #00220f; font-weight: bold; display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+    #status-indicator { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #ff3333; margin-right: 6px; box-shadow: 0 0 6px #ff3333; }
+    #status-indicator.online { background: #00ff66; box-shadow: 0 0 6px #00ff66; }
     #term { flex: 1; padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
     .sys { color: #00aa44; font-style: italic; font-size: 12px; text-align: center; margin: 4px 0; }
     .bubble { max-width: 80%; padding: 8px 12px; border-radius: 6px; word-break: break-word; line-height: 1.4; font-size: 14px; }
@@ -23,14 +23,21 @@
     #p { color: #00ff66; font-weight: bold; margin-right: 6px; }
     #msg { flex: 1; background: transparent; border: none; color: #00ff66; padding: 8px 0; outline: none; font-size: 15px; }
     #send { background: #003314; color: #00ff66; border: 1px solid #00ff66; padding: 10px 18px; cursor: pointer; font-weight: bold; border-radius: 4px; }
-    #send:hover { background: #00ff66; color: #000; }
+    #send:disabled { opacity: 0.4; cursor: not-allowed; }
+    #send:hover:not(:disabled) { background: #00ff66; color: #000; }
   </style>
 </head>
 <body>
   <div id="box">
-    <div id="head"><span>[DARK-CHAT // MQTT]</span><span id="role">CONNECTING TO BROKER...</span></div>
+    <div id="head">
+      <div>
+        <span id="status-indicator"></span>
+        <span>[DARK-CHAT // MQTT]</span>
+      </div>
+      <span id="role">CONNECTING...</span>
+    </div>
     <div id="term">
-      <div class="sys">> Cloud MQTT Relay Active. Global Reach.</div>
+      <div class="sys">> Initializing secure cloud broker uplink...</div>
     </div>
     <div id="inbox">
       <div id="input-wrapper">
@@ -40,52 +47,86 @@
       <button id="send" onclick="send()">SEND</button>
     </div>
   </div>
+
   <script>
-    var myId = "Anonymous " + Math.floor(Math.random() * 1 + 9);
+    // توليد معرف فريد للمتصفح حتى لا يطرد السيرفر أي جلسة
+    var randomSuffix = Math.random().toString(36).substring(2, 7);
+    var clientId = "WebClient-" + Date.now() + "-" + randomSuffix;
+    
+    // اسم العرض البسيط (Anonymous مع رقم عشوائي فريد لكل زائر)
+    var myName = "User_" + Math.floor(100 + Math.random() * 900);
+
     var term = document.getElementById("term");
     var input = document.getElementById("msg");
     var roleSpan = document.getElementById("role");
+    var statusDot = document.getElementById("status-indicator");
+    var sendBtn = document.getElementById("send");
     var topic = "lilygo/darkchat/room1";
 
-    // المنفذ 8884 مع SSL لدعم HTTPS على الهواتف والمتصفحات الحديثة بأمان
-    var client = new Paho.MQTT.Client("broker.hivemq.com", 8884, "/mqtt", myId);
+    var client = new Paho.MQTT.Client("broker.hivemq.com", 8884, "/mqtt", clientId);
+
+    function setOnline(state) {
+      if (state) {
+        statusDot.className = "online";
+        sendBtn.disabled = false;
+        roleSpan.innerText = myName + " [ONLINE]";
+      } else {
+        statusDot.className = "";
+        sendBtn.disabled = true;
+        roleSpan.innerText = "OFFLINE - RECONNECTING...";
+      }
+    }
 
     client.onConnectionLost = function(responseObject) {
+      setOnline(false);
       var d = document.createElement("div");
       d.className = "sys";
-      d.innerText = "> [ALERT] Disconnected from MQTT broker.";
+      d.innerText = "> [DISCONNECTED] Reconnecting to broker...";
       term.appendChild(d);
+      term.scrollTop = term.scrollHeight;
+      setTimeout(connectBroker, 3000); // محاولة إعادة الاتصال تلقائياً كل 3 ثوانٍ
     };
 
     client.onMessageArrived = function(message) {
       try {
         var data = JSON.parse(message.payloadString);
         var b = document.createElement("div");
-        var isMe = (data.senderId === myId);
+        var isMe = (data.senderId === clientId);
         b.className = "bubble " + (isMe ? "my-msg" : "peer-msg");
-        b.innerHTML = "<span class='sender-tag'>" + data.u + "</span>" + escapeHtml(data.m);
+        b.innerHTML = "<span class='sender-tag'>" + escapeHtml(data.u) + "</span>" + escapeHtml(data.m);
         term.appendChild(b);
         term.scrollTop = term.scrollHeight;
       } catch(err) {
-        console.error(err);
+        console.error("Payload error:", err);
       }
     };
 
-    client.connect({
-      useSSL: true,
-      onSuccess: function() {
-        roleSpan.innerText = "IDENTITY: " + myId;
-        client.subscribe(topic);
-        var sys = document.createElement("div");
-        sys.className = "sys";
-        sys.innerText = "> Joined Room: " + topic;
-        term.appendChild(sys);
-      }
-    });
+    function connectBroker() {
+      client.connect({
+        useSSL: true,
+        timeout: 10,
+        keepAliveInterval: 30,
+        cleanSession: true, // يضمن عدم تداخل أي جلسات قديمة ميتة
+        onSuccess: function() {
+          setOnline(true);
+          client.subscribe(topic, { qos: 1 });
+          var sys = document.createElement("div");
+          sys.className = "sys";
+          sys.innerText = "> [CONNECTED] Room: " + topic;
+          term.appendChild(sys);
+          term.scrollTop = term.scrollHeight;
+        },
+        onFailure: function(e) {
+          setOnline(false);
+          console.warn("Connect failed, retrying in 3s...", e);
+          setTimeout(connectBroker, 3000);
+        }
+      });
+    }
 
     function escapeHtml(text) {
       var div = document.createElement('div');
-      div.appendChild(document.createTextNode(text));
+      div.appendChild(document.createTextNode(text || ""));
       return div.innerHTML;
     }
 
@@ -93,17 +134,24 @@
       var val = input.value.trim();
       if(val && client.isConnected()){
         var payload = JSON.stringify({
-          senderId: myId,
-          u: myId,
+          senderId: clientId,
+          u: myName,
           m: val
         });
         var message = new Paho.MQTT.Message(payload);
         message.destinationName = topic;
+        message.qos = 1; // ضمان وصول الرسالة (At least once)
         client.send(message);
         input.value = "";
       }
     }
-    input.addEventListener("keypress", function(e){ if(e.key === "Enter") send(); });
+
+    input.addEventListener("keypress", function(e){ 
+      if(e.key === "Enter") send(); 
+    });
+
+    // بدء الاتصال عند تحميل الصفحة
+    connectBroker();
   </script>
 </body>
 </html>
