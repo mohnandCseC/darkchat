@@ -34,7 +34,7 @@
         <span id="status-indicator"></span>
         <span>[DARK-CHAT // MQTT]</span>
       </div>
-      <span id="role">CONNECTING...</span>
+      <span id="role">ASSIGNING IDENTITY...</span>
     </div>
     <div id="term">
       <div class="sys">> Initializing secure cloud broker uplink...</div>
@@ -49,27 +49,31 @@
   </div>
 
   <script>
-    // توليد معرف فريد للمتصفح حتى لا يطرد السيرفر أي جلسة
     var randomSuffix = Math.random().toString(36).substring(2, 7);
     var clientId = "WebClient-" + Date.now() + "-" + randomSuffix;
     
-    // اسم العرض البسيط (Anonymous مع رقم عشوائي فريد لكل زائر)
-    var myName = "User_" + Math.floor(100 + Math.random() * 900);
+    // الاحتفاظ بالاسم في الذاكرة المؤقتة للجلسة الحالية حتى لا يتغير عند عمل Refresh
+    var myName = sessionStorage.getItem("darkchat_name") || "";
+    var nameAssigned = (myName !== "");
 
     var term = document.getElementById("term");
     var input = document.getElementById("msg");
     var roleSpan = document.getElementById("role");
     var statusDot = document.getElementById("status-indicator");
     var sendBtn = document.getElementById("send");
-    var topic = "lilygo/darkchat/room1";
+
+    var chatTopic = "lilygo/darkchat/room1";
+    var counterTopic = "lilygo/darkchat/counter";
 
     var client = new Paho.MQTT.Client("broker.hivemq.com", 8884, "/mqtt", clientId);
 
     function setOnline(state) {
       if (state) {
         statusDot.className = "online";
-        sendBtn.disabled = false;
-        roleSpan.innerText = myName + " [ONLINE]";
+        if (nameAssigned) {
+          sendBtn.disabled = false;
+          roleSpan.innerText = myName + " [ONLINE]";
+        }
       } else {
         statusDot.className = "";
         sendBtn.disabled = true;
@@ -77,27 +81,54 @@
       }
     }
 
-    client.onConnectionLost = function(responseObject) {
+    client.onConnectionLost = function() {
       setOnline(false);
       var d = document.createElement("div");
       d.className = "sys";
       d.innerText = "> [DISCONNECTED] Reconnecting to broker...";
       term.appendChild(d);
       term.scrollTop = term.scrollHeight;
-      setTimeout(connectBroker, 3000); // محاولة إعادة الاتصال تلقائياً كل 3 ثوانٍ
+      setTimeout(connectBroker, 3000);
     };
 
     client.onMessageArrived = function(message) {
-      try {
-        var data = JSON.parse(message.payloadString);
-        var b = document.createElement("div");
-        var isMe = (data.senderId === clientId);
-        b.className = "bubble " + (isMe ? "my-msg" : "peer-msg");
-        b.innerHTML = "<span class='sender-tag'>" + escapeHtml(data.u) + "</span>" + escapeHtml(data.m);
-        term.appendChild(b);
+      // استقبال قيمة العداد لتحديد الاسم التسلسلي
+      if (message.destinationName === counterTopic && !nameAssigned) {
+        var currentCount = parseInt(message.payloadString) || 0;
+        var nextCount = currentCount + 1;
+        myName = "Anonymous " + nextCount;
+        nameAssigned = true;
+        sessionStorage.setItem("darkchat_name", myName);
+
+        // تحديث العداد على السيرفر كـ Retained ليعرف المستخدم التالي رقمه
+        var counterMsg = new Paho.MQTT.Message(nextCount.toString());
+        counterMsg.destinationName = counterTopic;
+        counterMsg.retained = true;
+        counterMsg.qos = 1;
+        client.send(counterMsg);
+
+        setOnline(true);
+        var sys = document.createElement("div");
+        sys.className = "sys";
+        sys.innerText = "> You joined as: " + myName;
+        term.appendChild(sys);
         term.scrollTop = term.scrollHeight;
-      } catch(err) {
-        console.error("Payload error:", err);
+        return;
+      }
+
+      // استقبال رسائل الدردشة
+      if (message.destinationName === chatTopic) {
+        try {
+          var data = JSON.parse(message.payloadString);
+          var b = document.createElement("div");
+          var isMe = (data.senderId === clientId);
+          b.className = "bubble " + (isMe ? "my-msg" : "peer-msg");
+          b.innerHTML = "<span class='sender-tag'>" + escapeHtml(data.u) + "</span>" + escapeHtml(data.m);
+          term.appendChild(b);
+          term.scrollTop = term.scrollHeight;
+        } catch(err) {
+          console.error("Payload error:", err);
+        }
       }
     };
 
@@ -106,13 +137,36 @@
         useSSL: true,
         timeout: 10,
         keepAliveInterval: 30,
-        cleanSession: true, // يضمن عدم تداخل أي جلسات قديمة ميتة
+        cleanSession: true,
         onSuccess: function() {
-          setOnline(true);
-          client.subscribe(topic, { qos: 1 });
+          // الاشتراك في غرفة الشات وغرفة العداد
+          client.subscribe(chatTopic, { qos: 1 });
+          client.subscribe(counterTopic, { qos: 1 });
+
+          if (nameAssigned) {
+            setOnline(true);
+          } else {
+            // مهلة احتياطية: إذا كان العداد فارغاً تماماً في السيرفر لأول مرة
+            setTimeout(function() {
+              if (!nameAssigned) {
+                myName = "Anonymous 1";
+                nameAssigned = true;
+                sessionStorage.setItem("darkchat_name", myName);
+
+                var counterMsg = new Paho.MQTT.Message("1");
+                counterMsg.destinationName = counterTopic;
+                counterMsg.retained = true;
+                counterMsg.qos = 1;
+                client.send(counterMsg);
+
+                setOnline(true);
+              }
+            }, 1200);
+          }
+
           var sys = document.createElement("div");
           sys.className = "sys";
-          sys.innerText = "> [CONNECTED] Room: " + topic;
+          sys.innerText = "> [CONNECTED] Room: " + chatTopic;
           term.appendChild(sys);
           term.scrollTop = term.scrollHeight;
         },
@@ -132,15 +186,15 @@
 
     function send(){
       var val = input.value.trim();
-      if(val && client.isConnected()){
+      if(val && client.isConnected() && nameAssigned){
         var payload = JSON.stringify({
           senderId: clientId,
           u: myName,
           m: val
         });
         var message = new Paho.MQTT.Message(payload);
-        message.destinationName = topic;
-        message.qos = 1; // ضمان وصول الرسالة (At least once)
+        message.destinationName = chatTopic;
+        message.qos = 1;
         client.send(message);
         input.value = "";
       }
@@ -150,7 +204,6 @@
       if(e.key === "Enter") send(); 
     });
 
-    // بدء الاتصال عند تحميل الصفحة
     connectBroker();
   </script>
 </body>
