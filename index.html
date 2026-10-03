@@ -15,10 +15,22 @@
     #online-badge { background: #003314; border: 1px solid #00ff66; border-radius: 10px; padding: 2px 8px; font-size: 11px; margin-left: 8px; color: #55ffff; }
     #term { flex: 1; padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
     .sys { color: #00aa44; font-style: italic; font-size: 12px; text-align: center; margin: 4px 0; }
-    .bubble { max-width: 80%; padding: 8px 12px; border-radius: 6px; word-break: break-word; line-height: 1.4; font-size: 14px; }
+    
+    .bubble { max-width: 80%; padding: 8px 12px; border-radius: 6px; word-break: break-word; line-height: 1.4; font-size: 14px; cursor: pointer; transition: 0.15s; position: relative; }
+    .bubble:hover { filter: brightness(1.2); }
     .my-msg { align-self: flex-start; background: #002b11; border: 1px solid #00ff66; color: #55ffff; }
     .peer-msg { align-self: flex-end; background: #2b1d00; border: 1px solid #ffaa00; color: #ffaa00; text-align: right; }
     .sender-tag { font-size: 11px; font-weight: bold; margin-bottom: 3px; display: block; }
+    
+    /* مظهر الرد المقتبس داخل الرسالة */
+    .quote-box { background: rgba(0, 0, 0, 0.4); border-left: 3px solid #55ffff; padding: 4px 8px; border-radius: 4px; margin-bottom: 6px; font-size: 11px; text-align: left; opacity: 0.85; }
+    .peer-msg .quote-box { border-left: none; border-right: 3px solid #ffaa00; text-align: right; }
+    .quote-user { font-weight: bold; margin-bottom: 2px; }
+
+    /* شريط المعاينة عند الرد */
+    #reply-bar { display: none; background: #001f0c; border-top: 1px solid #00ff66; padding: 6px 12px; font-size: 12px; justify-content: space-between; align-items: center; color: #55ffff; }
+    #reply-cancel { cursor: pointer; color: #ff3333; font-weight: bold; padding: 0 6px; font-size: 14px; }
+
     #inbox { border-top: 1px solid #00ff66; display: flex; align-items: center; gap: 6px; background: #000; padding: 8px 10px; }
     #input-wrapper { flex: 1; display: flex; align-items: center; border: 1px solid #00ff66; border-radius: 4px; background: #05140a; padding: 2px 8px; }
     #p { color: #00ff66; font-weight: bold; margin-right: 6px; }
@@ -39,34 +51,33 @@
         <span>[DARK-CHAT]</span>
         <span id="online-badge">Online: 1</span>
       </div>
-      <span id="role">CONNECTING...</span>
+      <span id="role">ASSIGNING SLOT...</span>
     </div>
+
     <div id="term">
-      <div class="sys">> Voice Encryption & Anonymizer Engine Ready.</div>
+      <div class="sys">> Tap any message to Reply (Like WhatsApp).</div>
     </div>
+
+    <!-- شريط الرد -->
+    <div id="reply-bar">
+      <span id="reply-text">Replying to...</span>
+      <span id="reply-cancel" onclick="cancelReply()">✖</span>
+    </div>
+
     <div id="inbox">
       <button id="mic-btn" class="btn" onclick="toggleRecord()">🎤 REC</button>
       <div id="input-wrapper">
         <span id="p">></span>
-        <input type="text" id="msg" placeholder="Type encrypted message..." autocomplete="off">
+        <input type="text" id="msg" placeholder="Type message..." autocomplete="off">
       </div>
       <button id="send" class="btn" onclick="send()">SEND</button>
     </div>
   </div>
 
   <script>
-    // الحفاظ على معرف واسم المتصفح بدون تكرار
-    var clientId = localStorage.getItem("dc_client_id");
-    if (!clientId) {
-      clientId = "WebClient-" + Math.random().toString(36).substring(2, 9);
-      localStorage.setItem("dc_client_id", clientId);
-    }
-
-    var myName = localStorage.getItem("dc_anon_name");
-    if (!myName) {
-      myName = "Anon_" + Math.floor(100 + Math.random() * 900);
-      localStorage.setItem("dc_anon_name", myName);
-    }
+    var clientId = "Client-" + Date.now() + "-" + Math.random().toString(36).substring(2, 7);
+    var mySlot = null;
+    var myName = "";
 
     var term = document.getElementById("term");
     var input = document.getElementById("msg");
@@ -75,33 +86,63 @@
     var onlineBadge = document.getElementById("online-badge");
     var micBtn = document.getElementById("mic-btn");
     var sendBtn = document.getElementById("send");
+    var replyBar = document.getElementById("reply-bar");
+    var replyText = document.getElementById("reply-text");
 
     var chatTopic = "lilygo/darkchat/room1";
     var presenceTopic = "lilygo/darkchat/presence";
-    var activePeers = {};
+
+    var peers = {}; // id -> { slot: number, lastSeen: timestamp }
+    var currentReply = null; // يحفظ بيانات الرسالة الجاري الرد عليها
 
     var client = new Paho.MQTT.Client("broker.hivemq.com", 8884, "/mqtt", clientId);
 
+    // اختيار أصغر رقم غير مستخدم بين 1 و 9
+    function claimLowestSlot() {
+      var taken = {};
+      var now = Date.now();
+      for (var id in peers) {
+        if (now - peers[id].lastSeen < 12000) {
+          taken[peers[id].slot] = true;
+        } else {
+          delete peers[id];
+        }
+      }
+      for (var i = 1; i <= 9; i++) {
+        if (!taken[i]) {
+          mySlot = i;
+          myName = "Anonymous " + i;
+          roleSpan.innerText = myName + " [ONLINE]";
+          sendBtn.disabled = false;
+          micBtn.disabled = false;
+          break;
+        }
+      }
+      updateOnlineCount();
+    }
+
     function updateOnlineCount() {
       var now = Date.now();
-      var count = 1; // أنا
-      for (var id in activePeers) {
-        if (now - activePeers[id] < 12000) count++;
-        else delete activePeers[id];
+      var count = mySlot ? 1 : 0;
+      for (var id in peers) {
+        if (now - peers[id].lastSeen < 12000) count++;
+        else delete peers[id];
       }
       onlineBadge.innerText = "Online: " + count;
     }
     setInterval(updateOnlineCount, 3000);
 
+    // إرسال إشعار تواجد بالرقم الحالي
     function announcePresence() {
-      if (client.isConnected()) {
-        var msg = new Paho.MQTT.Message(clientId);
+      if (client.isConnected() && mySlot) {
+        var payload = JSON.stringify({ id: clientId, slot: mySlot });
+        var msg = new Paho.MQTT.Message(payload);
         msg.destinationName = presenceTopic;
         msg.qos = 0;
         client.send(msg);
       }
     }
-    setInterval(announcePresence, 4000);
+    setInterval(announcePresence, 3000);
 
     client.onConnectionLost = function() {
       statusDot.className = "";
@@ -113,11 +154,17 @@
 
     client.onMessageArrived = function(message) {
       if (message.destinationName === presenceTopic) {
-        var pid = message.payloadString;
-        if (pid !== clientId) {
-          activePeers[pid] = Date.now();
-          updateOnlineCount();
-        }
+        try {
+          var p = JSON.parse(message.payloadString);
+          if (p.id !== clientId) {
+            peers[p.id] = { slot: p.slot, lastSeen: Date.now() };
+            // لو صادف تعارض على نفس الرقم، الشخص الأحدث يعيد اختيار أصغر رقم شاغر
+            if (mySlot && p.slot === mySlot && clientId < p.id) {
+              claimLowestSlot();
+            }
+            updateOnlineCount();
+          }
+        } catch(e){}
         return;
       }
 
@@ -128,13 +175,27 @@
           var isMe = (data.senderId === clientId);
           b.className = "bubble " + (isMe ? "my-msg" : "peer-msg");
 
-          var html = "<span class='sender-tag'>" + escapeHtml(data.u) + "</span>";
-          if (data.type === "voice") {
-            html += "<audio controls src='" + data.audio + "'></audio>";
-          } else {
-            html += escapeHtml(data.m);
+          var inner = "<span class='sender-tag'>" + escapeHtml(data.u) + "</span>";
+
+          // لو كانت الرسالة رداً على رسالة سابقة
+          if (data.reply) {
+            inner += "<div class='quote-box'><div class='quote-user'>" + escapeHtml(data.reply.u) + "</div>" + escapeHtml(data.reply.m) + "</div>";
           }
-          b.innerHTML = html;
+
+          if (data.type === "voice") {
+            inner += "<audio controls src='" + data.audio + "'></audio>";
+          } else {
+            inner += escapeHtml(data.m);
+          }
+
+          b.innerHTML = inner;
+
+          // عند الضغط على الفقاعة، تفعيل وضع الرد عليها
+          b.onclick = function() {
+            var snippet = (data.type === "voice") ? "🎤 Voice Note" : data.m;
+            setReply(data.u, snippet);
+          };
+
           term.appendChild(b);
           term.scrollTop = term.scrollHeight;
         } catch(err) {
@@ -142,6 +203,18 @@
         }
       }
     };
+
+    function setReply(user, snippet) {
+      currentReply = { u: user, m: snippet };
+      replyText.innerText = "Replying to " + user + ": " + (snippet.length > 35 ? snippet.substring(0, 35) + "..." : snippet);
+      replyBar.style.display = "flex";
+      input.focus();
+    }
+
+    function cancelReply() {
+      currentReply = null;
+      replyBar.style.display = "none";
+    }
 
     function connectBroker() {
       client.connect({
@@ -151,12 +224,11 @@
         cleanSession: true,
         onSuccess: function() {
           statusDot.className = "online";
-          roleSpan.innerText = myName + " [ONLINE]";
-          sendBtn.disabled = false;
-          micBtn.disabled = false;
           client.subscribe(chatTopic, { qos: 1 });
           client.subscribe(presenceTopic, { qos: 0 });
-          announcePresence();
+
+          // استكشاف أرقام المتواجدين خلال أول ثانية ثم حجز أول رقم فارغ
+          setTimeout(claimLowestSlot, 1200);
         },
         onFailure: function() {
           setTimeout(connectBroker, 3000);
@@ -172,23 +244,25 @@
 
     function send(){
       var val = input.value.trim();
-      if(val && client.isConnected()){
+      if(val && client.isConnected() && mySlot){
         var payload = JSON.stringify({
           senderId: clientId,
           u: myName,
           type: "text",
-          m: val
+          m: val,
+          reply: currentReply
         });
         var msg = new Paho.MQTT.Message(payload);
         msg.destinationName = chatTopic;
         msg.qos = 1;
         client.send(msg);
         input.value = "";
+        cancelReply();
       }
     }
     input.addEventListener("keypress", function(e){ if(e.key === "Enter") send(); });
 
-    // مغير الصوت العشوائي والتسجيل
+    // مغير الصوت العشوائي
     var mediaRecorder;
     var audioChunks = [];
     var isRecording = false;
@@ -206,7 +280,7 @@
           micBtn.classList.add("recording");
           micBtn.innerText = "⏹ STOP";
         } catch (err) {
-          alert("Microphone permission denied / not supported.");
+          alert("Microphone permission required.");
         }
       } else {
         mediaRecorder.stop();
@@ -222,8 +296,7 @@
       var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       var decodedData = await audioCtx.decodeAudioData(arrayBuffer);
 
-      // تشويه وتغيير التردد الصوتي بنسبة عشوائية لتغيير النبرة تماماً
-      var pitchFactors = [0.65, 0.75, 1.35, 1.45]; // أصوات روبوتية / طبقات متغيرة
+      var pitchFactors = [0.65, 0.75, 1.35, 1.45];
       var randomFactor = pitchFactors[Math.floor(Math.random() * pitchFactors.length)];
 
       var offlineCtx = new OfflineAudioContext(
@@ -234,7 +307,7 @@
 
       var source = offlineCtx.createBufferSource();
       source.buffer = decodedData;
-      source.playbackRate.value = randomFactor; // تسريع/إبطاء الطبقة لإخفاء الصوت الحقيقي
+      source.playbackRate.value = randomFactor;
       source.connect(offlineCtx.destination);
       source.start(0);
 
@@ -245,22 +318,23 @@
       reader.readAsDataURL(wavBlob);
       reader.onloadend = function() {
         var base64data = reader.result;
-        if (client.isConnected()) {
+        if (client.isConnected() && mySlot) {
           var payload = JSON.stringify({
             senderId: clientId,
             u: myName,
             type: "voice",
-            audio: base64data
+            audio: base64data,
+            reply: currentReply
           });
           var msg = new Paho.MQTT.Message(payload);
           msg.destinationName = chatTopic;
           msg.qos = 1;
           client.send(msg);
+          cancelReply();
         }
       };
     }
 
-    // تحويل البيانات الصوتية إلى ملف WAV خفيف للإرسال
     function bufferToWave(abuffer, len) {
       var numOfChan = abuffer.numberOfChannels,
           length = len * numOfChan * 2 + 44,
