@@ -12,6 +12,7 @@
     #head { border-bottom: 1px solid #00ff66; padding: 10px 14px; background: #00220f; font-weight: bold; display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
     #status-indicator { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #ff3333; margin-right: 6px; box-shadow: 0 0 6px #ff3333; }
     #status-indicator.online { background: #00ff66; box-shadow: 0 0 6px #00ff66; }
+    #online-badge { background: #003314; border: 1px solid #00ff66; border-radius: 10px; padding: 2px 8px; font-size: 11px; margin-left: 8px; color: #55ffff; }
     #term { flex: 1; padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
     .sys { color: #00aa44; font-style: italic; font-size: 12px; text-align: center; margin: 4px 0; }
     .bubble { max-width: 80%; padding: 8px 12px; border-radius: 6px; word-break: break-word; line-height: 1.4; font-size: 14px; }
@@ -22,9 +23,12 @@
     #input-wrapper { flex: 1; display: flex; align-items: center; border: 1px solid #00ff66; border-radius: 4px; background: #05140a; padding: 2px 8px; }
     #p { color: #00ff66; font-weight: bold; margin-right: 6px; }
     #msg { flex: 1; background: transparent; border: none; color: #00ff66; padding: 8px 0; outline: none; font-size: 15px; }
-    #send { background: #003314; color: #00ff66; border: 1px solid #00ff66; padding: 10px 18px; cursor: pointer; font-weight: bold; border-radius: 4px; }
-    #send:disabled { opacity: 0.4; cursor: not-allowed; }
-    #send:hover:not(:disabled) { background: #00ff66; color: #000; }
+    .btn { background: #003314; color: #00ff66; border: 1px solid #00ff66; padding: 9px 14px; cursor: pointer; font-weight: bold; border-radius: 4px; font-size: 13px; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn:hover:not(:disabled) { background: #00ff66; color: #000; }
+    #mic-btn.recording { background: #ff2222; color: #fff; border-color: #ff2222; animation: blink 0.8s infinite; }
+    @keyframes blink { 50% { opacity: 0.5; } }
+    audio { height: 32px; max-width: 220px; outline: none; filter: invert(1) hue-rotate(180deg); margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -32,102 +36,109 @@
     <div id="head">
       <div>
         <span id="status-indicator"></span>
-        <span>[DARK-CHAT // MQTT]</span>
+        <span>[DARK-CHAT]</span>
+        <span id="online-badge">Online: 1</span>
       </div>
-      <span id="role">ASSIGNING IDENTITY...</span>
+      <span id="role">CONNECTING...</span>
     </div>
     <div id="term">
-      <div class="sys">> Initializing secure cloud broker uplink...</div>
+      <div class="sys">> Voice Encryption & Anonymizer Engine Ready.</div>
     </div>
     <div id="inbox">
+      <button id="mic-btn" class="btn" onclick="toggleRecord()">🎤 REC</button>
       <div id="input-wrapper">
         <span id="p">></span>
-        <input type="text" id="msg" placeholder="Type text..." autocomplete="off">
+        <input type="text" id="msg" placeholder="Type encrypted message..." autocomplete="off">
       </div>
-      <button id="send" onclick="send()">SEND</button>
+      <button id="send" class="btn" onclick="send()">SEND</button>
     </div>
   </div>
 
   <script>
-    var randomSuffix = Math.random().toString(36).substring(2, 7);
-    var clientId = "WebClient-" + Date.now() + "-" + randomSuffix;
-    
-    // الاحتفاظ بالاسم في الذاكرة المؤقتة للجلسة الحالية حتى لا يتغير عند عمل Refresh
-    var myName = sessionStorage.getItem("darkchat_name") || "";
-    var nameAssigned = (myName !== "");
+    // الحفاظ على معرف واسم المتصفح بدون تكرار
+    var clientId = localStorage.getItem("dc_client_id");
+    if (!clientId) {
+      clientId = "WebClient-" + Math.random().toString(36).substring(2, 9);
+      localStorage.setItem("dc_client_id", clientId);
+    }
+
+    var myName = localStorage.getItem("dc_anon_name");
+    if (!myName) {
+      myName = "Anon_" + Math.floor(100 + Math.random() * 900);
+      localStorage.setItem("dc_anon_name", myName);
+    }
 
     var term = document.getElementById("term");
     var input = document.getElementById("msg");
     var roleSpan = document.getElementById("role");
     var statusDot = document.getElementById("status-indicator");
+    var onlineBadge = document.getElementById("online-badge");
+    var micBtn = document.getElementById("mic-btn");
     var sendBtn = document.getElementById("send");
 
     var chatTopic = "lilygo/darkchat/room1";
-    var counterTopic = "lilygo/darkchat/counter";
+    var presenceTopic = "lilygo/darkchat/presence";
+    var activePeers = {};
 
     var client = new Paho.MQTT.Client("broker.hivemq.com", 8884, "/mqtt", clientId);
 
-    function setOnline(state) {
-      if (state) {
-        statusDot.className = "online";
-        if (nameAssigned) {
-          sendBtn.disabled = false;
-          roleSpan.innerText = myName + " [ONLINE]";
-        }
-      } else {
-        statusDot.className = "";
-        sendBtn.disabled = true;
-        roleSpan.innerText = "OFFLINE - RECONNECTING...";
+    function updateOnlineCount() {
+      var now = Date.now();
+      var count = 1; // أنا
+      for (var id in activePeers) {
+        if (now - activePeers[id] < 12000) count++;
+        else delete activePeers[id];
+      }
+      onlineBadge.innerText = "Online: " + count;
+    }
+    setInterval(updateOnlineCount, 3000);
+
+    function announcePresence() {
+      if (client.isConnected()) {
+        var msg = new Paho.MQTT.Message(clientId);
+        msg.destinationName = presenceTopic;
+        msg.qos = 0;
+        client.send(msg);
       }
     }
+    setInterval(announcePresence, 4000);
 
     client.onConnectionLost = function() {
-      setOnline(false);
-      var d = document.createElement("div");
-      d.className = "sys";
-      d.innerText = "> [DISCONNECTED] Reconnecting to broker...";
-      term.appendChild(d);
-      term.scrollTop = term.scrollHeight;
+      statusDot.className = "";
+      roleSpan.innerText = "OFFLINE - RECONNECTING...";
+      sendBtn.disabled = true;
+      micBtn.disabled = true;
       setTimeout(connectBroker, 3000);
     };
 
     client.onMessageArrived = function(message) {
-      // استقبال قيمة العداد لتحديد الاسم التسلسلي
-      if (message.destinationName === counterTopic && !nameAssigned) {
-        var currentCount = parseInt(message.payloadString) || 0;
-        var nextCount = currentCount + 1;
-        myName = "Anonymous " + nextCount;
-        nameAssigned = true;
-        sessionStorage.setItem("darkchat_name", myName);
-
-        // تحديث العداد على السيرفر كـ Retained ليعرف المستخدم التالي رقمه
-        var counterMsg = new Paho.MQTT.Message(nextCount.toString());
-        counterMsg.destinationName = counterTopic;
-        counterMsg.retained = true;
-        counterMsg.qos = 1;
-        client.send(counterMsg);
-
-        setOnline(true);
-        var sys = document.createElement("div");
-        sys.className = "sys";
-        sys.innerText = "> You joined as: " + myName;
-        term.appendChild(sys);
-        term.scrollTop = term.scrollHeight;
+      if (message.destinationName === presenceTopic) {
+        var pid = message.payloadString;
+        if (pid !== clientId) {
+          activePeers[pid] = Date.now();
+          updateOnlineCount();
+        }
         return;
       }
 
-      // استقبال رسائل الدردشة
       if (message.destinationName === chatTopic) {
         try {
           var data = JSON.parse(message.payloadString);
           var b = document.createElement("div");
           var isMe = (data.senderId === clientId);
           b.className = "bubble " + (isMe ? "my-msg" : "peer-msg");
-          b.innerHTML = "<span class='sender-tag'>" + escapeHtml(data.u) + "</span>" + escapeHtml(data.m);
+
+          var html = "<span class='sender-tag'>" + escapeHtml(data.u) + "</span>";
+          if (data.type === "voice") {
+            html += "<audio controls src='" + data.audio + "'></audio>";
+          } else {
+            html += escapeHtml(data.m);
+          }
+          b.innerHTML = html;
           term.appendChild(b);
           term.scrollTop = term.scrollHeight;
         } catch(err) {
-          console.error("Payload error:", err);
+          console.error(err);
         }
       }
     };
@@ -139,70 +150,143 @@
         keepAliveInterval: 30,
         cleanSession: true,
         onSuccess: function() {
-          // الاشتراك في غرفة الشات وغرفة العداد
+          statusDot.className = "online";
+          roleSpan.innerText = myName + " [ONLINE]";
+          sendBtn.disabled = false;
+          micBtn.disabled = false;
           client.subscribe(chatTopic, { qos: 1 });
-          client.subscribe(counterTopic, { qos: 1 });
-
-          if (nameAssigned) {
-            setOnline(true);
-          } else {
-            // مهلة احتياطية: إذا كان العداد فارغاً تماماً في السيرفر لأول مرة
-            setTimeout(function() {
-              if (!nameAssigned) {
-                myName = "Anonymous 1";
-                nameAssigned = true;
-                sessionStorage.setItem("darkchat_name", myName);
-
-                var counterMsg = new Paho.MQTT.Message("1");
-                counterMsg.destinationName = counterTopic;
-                counterMsg.retained = true;
-                counterMsg.qos = 1;
-                client.send(counterMsg);
-
-                setOnline(true);
-              }
-            }, 1200);
-          }
-
-          var sys = document.createElement("div");
-          sys.className = "sys";
-          sys.innerText = "> [CONNECTED] Room: " + chatTopic;
-          term.appendChild(sys);
-          term.scrollTop = term.scrollHeight;
+          client.subscribe(presenceTopic, { qos: 0 });
+          announcePresence();
         },
-        onFailure: function(e) {
-          setOnline(false);
-          console.warn("Connect failed, retrying in 3s...", e);
+        onFailure: function() {
           setTimeout(connectBroker, 3000);
         }
       });
     }
 
     function escapeHtml(text) {
-      var div = document.createElement('div');
-      div.appendChild(document.createTextNode(text || ""));
-      return div.innerHTML;
+      var d = document.createElement('div');
+      d.appendChild(document.createTextNode(text || ""));
+      return d.innerHTML;
     }
 
     function send(){
       var val = input.value.trim();
-      if(val && client.isConnected() && nameAssigned){
+      if(val && client.isConnected()){
         var payload = JSON.stringify({
           senderId: clientId,
           u: myName,
+          type: "text",
           m: val
         });
-        var message = new Paho.MQTT.Message(payload);
-        message.destinationName = chatTopic;
-        message.qos = 1;
-        client.send(message);
+        var msg = new Paho.MQTT.Message(payload);
+        msg.destinationName = chatTopic;
+        msg.qos = 1;
+        client.send(msg);
         input.value = "";
       }
     }
+    input.addEventListener("keypress", function(e){ if(e.key === "Enter") send(); });
 
-    input.addEventListener("keypress", function(e){ 
-      if(e.key === "Enter") send(); 
-    });
+    // مغير الصوت العشوائي والتسجيل
+    var mediaRecorder;
+    var audioChunks = [];
+    var isRecording = false;
+
+    async function toggleRecord() {
+      if (!isRecording) {
+        try {
+          var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          audioChunks = [];
+          mediaRecorder = new MediaRecorder(stream);
+          mediaRecorder.ondataavailable = function(e) { audioChunks.push(e.data); };
+          mediaRecorder.onstop = processAndSendAudio;
+          mediaRecorder.start();
+          isRecording = true;
+          micBtn.classList.add("recording");
+          micBtn.innerText = "⏹ STOP";
+        } catch (err) {
+          alert("Microphone permission denied / not supported.");
+        }
+      } else {
+        mediaRecorder.stop();
+        isRecording = false;
+        micBtn.classList.remove("recording");
+        micBtn.innerText = "🎤 REC";
+      }
+    }
+
+    async function processAndSendAudio() {
+      var blob = new Blob(audioChunks, { type: 'audio/webm' });
+      var arrayBuffer = await blob.arrayBuffer();
+      var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      var decodedData = await audioCtx.decodeAudioData(arrayBuffer);
+
+      // تشويه وتغيير التردد الصوتي بنسبة عشوائية لتغيير النبرة تماماً
+      var pitchFactors = [0.65, 0.75, 1.35, 1.45]; // أصوات روبوتية / طبقات متغيرة
+      var randomFactor = pitchFactors[Math.floor(Math.random() * pitchFactors.length)];
+
+      var offlineCtx = new OfflineAudioContext(
+        decodedData.numberOfChannels,
+        decodedData.duration * decodedData.sampleRate / randomFactor,
+        decodedData.sampleRate
+      );
+
+      var source = offlineCtx.createBufferSource();
+      source.buffer = decodedData;
+      source.playbackRate.value = randomFactor; // تسريع/إبطاء الطبقة لإخفاء الصوت الحقيقي
+      source.connect(offlineCtx.destination);
+      source.start(0);
+
+      var renderedBuffer = await offlineCtx.startRendering();
+      var wavBlob = bufferToWave(renderedBuffer, renderedBuffer.length);
+
+      var reader = new FileReader();
+      reader.readAsDataURL(wavBlob);
+      reader.onloadend = function() {
+        var base64data = reader.result;
+        if (client.isConnected()) {
+          var payload = JSON.stringify({
+            senderId: clientId,
+            u: myName,
+            type: "voice",
+            audio: base64data
+          });
+          var msg = new Paho.MQTT.Message(payload);
+          msg.destinationName = chatTopic;
+          msg.qos = 1;
+          client.send(msg);
+        }
+      };
+    }
+
+    // تحويل البيانات الصوتية إلى ملف WAV خفيف للإرسال
+    function bufferToWave(abuffer, len) {
+      var numOfChan = abuffer.numberOfChannels,
+          length = len * numOfChan * 2 + 44,
+          out = new DataView(new ArrayBuffer(length)),
+          channels = [], sample, offset = 0, pos = 0;
+
+      function setUint16(data) { out.setUint16(pos, data, true); pos += 2; }
+      function setUint32(data) { out.setUint32(pos, data, true); pos += 4; }
+
+      setUint32(0x46464952); setUint32(length - 8); setUint32(0x45564157);
+      setUint32(0x20746d66); setUint32(16); setUint16(1); setUint16(numOfChan);
+      setUint32(abuffer.sampleRate); setUint32(abuffer.sampleRate * 2 * numOfChan);
+      setUint16(numOfChan * 2); setUint16(16); setUint32(0x61746164); setUint32(length - pos - 4);
+
+      for (var i = 0; i < abuffer.numberOfChannels; i++) channels.push(abuffer.getChannelData(i));
+      while (pos < length) {
+        for (var i = 0; i < numOfChan; i++) {
+          sample = Math.max(-1, Math.min(1, channels[i][offset]));
+          sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767)|0;
+          out.setInt16(pos, sample, true);
+          pos += 2;
+        }
+        offset++;
+      }
+      return new Blob([out.buffer], { type: "audio/wav" });
+    }
 
     connectBroker();
   </script>
